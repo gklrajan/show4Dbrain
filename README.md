@@ -77,7 +77,7 @@ The variable inside the file is auto-detected (largest 3D dataset); override wit
 
 ## Using the GUI
 
-![GUI screenshot](img/gui_img.png)
+![GUI screenshot](img/img_gui.png)
 
 - **Z slice** — choose the optical plane. Switching planes reloads the image
   window (tiles are slice-specific).
