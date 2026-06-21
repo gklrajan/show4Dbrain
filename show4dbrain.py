@@ -330,6 +330,7 @@ class Viewer(QtWidgets.QMainWindow):
         self.current_z = 0
         self.current_v = 0
         self.levels = None
+        self.bin = 1                 # lateral display/ROI binning factor (1 = off)
 
         # image tiles
         self.tiles = collections.OrderedDict()   # tile_index -> (k,H,W) array
@@ -397,6 +398,24 @@ class Viewer(QtWidgets.QMainWindow):
                                  "Changing this re-slices the stack and reloads.")
         zrow.addWidget(self.spv_spin)
         lv.addLayout(zrow)
+
+        # lateral display binning (NxN average; affects what you see AND where
+        # ROIs sit / what their traces average -- memory is unaffected)
+        brow = QtWidgets.QHBoxLayout()
+        self.bin_on = QtWidgets.QCheckBox("bin display")
+        self.bin_on.setToolTip("Show the image laterally NxN-averaged so sparse, "
+                               "low-contrast signal pools up and becomes visible.\n"
+                               "ROIs are placed on, and traces computed from, the "
+                               "binned image. Changing the factor clears ROIs.")
+        brow.addWidget(self.bin_on)
+        brow.addWidget(QtWidgets.QLabel("factor"))
+        self.bin_spin = QtWidgets.QSpinBox()
+        self.bin_spin.setRange(2, 200)
+        self.bin_spin.setValue(14)   # ~18 um hexagon at ~1.3 um/px; editable
+        self.bin_spin.setEnabled(False)
+        brow.addWidget(self.bin_spin)
+        brow.addStretch(1)
+        lv.addLayout(brow)
 
         # time
         trow = QtWidgets.QHBoxLayout()
@@ -507,6 +526,8 @@ class Viewer(QtWidgets.QMainWindow):
             (w.stateChanged if isinstance(w, QtWidgets.QCheckBox)
              else w.valueChanged).connect(self._draw_stim)
         self.time_line.sigPositionChanged.connect(self._on_timeline_drag)
+        self.bin_on.stateChanged.connect(self._on_bin_changed)
+        self.bin_spin.editingFinished.connect(self._on_bin_changed)
 
     # ---- Z / spv ------------------------------------------------------------
     def _on_z_changed(self, z):
@@ -600,12 +621,7 @@ class Viewer(QtWidgets.QMainWindow):
             else:
                 break
         if self.levels is None:
-            sample = arr[:: max(1, arr.shape[0] // 10)].ravel()
-            lo, hi = np.percentile(sample, [1.0, 99.5])
-            if hi <= lo:
-                hi = lo + 1.0
-            self.levels = (float(lo), float(hi))
-            self.hist.setLevels(*self.levels)
+            pass  # levels are fit lazily in _display_from_tile (handles binning)
         if ti == cur_ti:
             self.progress.setValue(100)
             self._display_from_tile(self.current_v)
@@ -619,13 +635,20 @@ class Viewer(QtWidgets.QMainWindow):
         if ti not in self.tiles:
             return
         self.tiles.move_to_end(ti)
-        frame = self.tiles[ti][v - ti * self.k]
-        self.img_item.setImage(frame, autoLevels=False, levels=self.levels)
+        disp = self._bin_image(self.tiles[ti][v - ti * self.k])
+        if self.levels is None:
+            lo, hi = np.percentile(disp, [1.0, 99.5])
+            if hi <= lo:
+                hi = lo + 1.0
+            self.levels = (float(lo), float(hi))
+            self.hist.setLevels(*self.levels)
+        self.img_item.setImage(disp, autoLevels=False, levels=self.levels)
+        binnote = "" if self.bin == 1 else f" | bin {self.bin}x -> {self.Hb}x{self.Wb}"
         self.status.setText(
             f"z = {self.current_z} | vol {v}/{self.stack.n_volumes-1} | "
             f"window {self.k} vols x {self.stack.H}x{self.stack.W} "
             f"(~{self.k*self.stack.vol_nbytes/1e6:.0f} MB/tile, "
-            f"{len(self.tiles)} resident)")
+            f"{len(self.tiles)} resident){binnote}")
 
     # ---- time ---------------------------------------------------------------
     def _on_t_changed(self, v):
@@ -644,17 +667,45 @@ class Viewer(QtWidgets.QMainWindow):
         v = int(np.clip(round(self.time_line.value()), 0, self.stack.n_volumes - 1))
         self.t_slider.setValue(v)
 
+    # ---- display binning ----------------------------------------------------
+    @property
+    def Hb(self):
+        return self.stack.H // self.bin
+
+    @property
+    def Wb(self):
+        return self.stack.W // self.bin
+
+    def _bin_image(self, frame):
+        b = self.bin
+        if b <= 1:
+            return frame
+        H, W = frame.shape
+        hc, wc = (H // b) * b, (W // b) * b
+        return frame[:hc, :wc].reshape(H // b, b, W // b, b).mean(axis=(1, 3))
+
+    def _on_bin_changed(self):
+        self.bin_spin.setEnabled(self.bin_on.isChecked())
+        new_bin = self.bin_spin.value() if self.bin_on.isChecked() else 1
+        if new_bin == self.bin:
+            return
+        self.bin = new_bin
+        self._clear_rois()        # ROI coords live in binned pixels -> invalid on change
+        self.levels = None        # refit contrast for the binned image
+        self._display_from_tile(self.current_v)
+        self.vb.autoRange()       # image extent changed; refit view
+
     # ---- ROIs ---------------------------------------------------------------
     def _probe_frame(self):
         # zero array only used for shape in getArraySlice (values unused)
-        return np.empty((self.stack.H, self.stack.W), dtype=np.float32)
+        return np.empty((self.Hb, self.Wb), dtype=np.float32)
 
     def _add_roi(self, kind):
         self._roi_counter += 1
         color = ROI_COLORS[(self._roi_counter - 1) % len(ROI_COLORS)]
         pen = pg.mkPen(color, width=2)
-        cx, cy = self.stack.W // 2, self.stack.H // 2
-        size = min(100, max(8, min(self.stack.H, self.stack.W) // 3))
+        cx, cy = self.Wb // 2, self.Hb // 2
+        size = max(2, min(80, min(self.Hb, self.Wb) // 3))
         if kind == "rect":
             roi = pg.RectROI([cx - size // 2, cy - size // 2], [size, size],
                              pen=pen, removable=True)
@@ -720,20 +771,31 @@ class Viewer(QtWidgets.QMainWindow):
         self.selected_roi = None
 
     def _roi_spec(self, roi):
+        # ROI is drawn on the binned display -> slices are in binned pixels
         sl, _ = roi.getArraySlice(self._probe_frame(), self.img_item,
                                   axes=(0, 1), returnSlice=True)
-        r0 = max(0, int(sl[0].start)); r1 = min(self.stack.H, int(sl[0].stop))
-        c0 = max(0, int(sl[1].start)); c1 = min(self.stack.W, int(sl[1].stop))
-        h, w = r1 - r0, c1 - c0
-        if h <= 0 or w <= 0:
+        rb0 = max(0, int(sl[0].start)); rb1 = min(self.Hb, int(sl[0].stop))
+        cb0 = max(0, int(sl[1].start)); cb1 = min(self.Wb, int(sl[1].stop))
+        hb, wb = rb1 - rb0, cb1 - cb0
+        if hb <= 0 or wb <= 0:
             return None
+        # binned mask
         if isinstance(roi, pg.EllipseROI):
-            yy, xx = np.mgrid[0:h, 0:w]
-            cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
-            ry, rx = max(h / 2.0, 0.5), max(w / 2.0, 0.5)
-            mask = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2 <= 1.0
+            yy, xx = np.mgrid[0:hb, 0:wb]
+            cy, cx = (hb - 1) / 2.0, (wb - 1) / 2.0
+            ry, rx = max(hb / 2.0, 0.5), max(wb / 2.0, 0.5)
+            mask_b = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2 <= 1.0
         else:
-            mask = np.ones((h, w), dtype=bool)
+            mask_b = np.ones((hb, wb), dtype=bool)
+        b = self.bin
+        # map binned bbox -> full-resolution pixels and upsample the mask, so the
+        # trace read averages exactly the full-res pixels under the binned ROI
+        # (mean over binned super-pixels == mean over those full-res pixels).
+        r0, r1, c0, c1 = rb0 * b, rb1 * b, cb0 * b, cb1 * b
+        if b > 1:
+            mask = np.repeat(np.repeat(mask_b, b, axis=0), b, axis=1)
+        else:
+            mask = mask_b
         return {"rid": id(roi), "r0": r0, "r1": r1, "c0": c0, "c1": c1, "mask": mask}
 
     # ---- trace pipeline -----------------------------------------------------
