@@ -2,7 +2,7 @@
 
 A memory-efficient GUI for browsing large 4D image stacks (`Y × X × Z × T`)
 stored as a single 3D array in an HDF5 / MATLAB v7.3 `.mat` file, and for
-pulling **full-length** ROI time-series with raw and rolling-baseline `dF/F`
+pulling full-length ROI time-series with raw and rolling-baseline `dF/F`
 traces.
 
 It was written for volumetric calcium imaging, but nothing in it is specific to
