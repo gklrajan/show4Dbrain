@@ -108,3 +108,4 @@ The variable inside the file is auto-detected (largest 3D dataset); override wit
   `--ram-frac` for larger windows (fewer boundaries) if you have the RAM.
 - **First read of a plane is slow** — MATLAB v7.3 files are often gzip-chunked;
   the first read pays a decompression cost, then it's fast.
+- **Have another issue or feature request?** — Please create a new issue! Thank you! :)
