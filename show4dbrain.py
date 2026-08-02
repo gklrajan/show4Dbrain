@@ -53,6 +53,12 @@ import collections
 
 import numpy as np
 
+from processed_roi_import import (
+    ProcessedROIImportError,
+    find_hex_rois_file,
+    load_significant_rois,
+)
+
 try:
     import h5py
 except ImportError:
@@ -251,13 +257,13 @@ class TileLoader(QtCore.QThread):
 
 
 class TraceLoader(QtCore.QThread):
-    finished_traces = QtCore.pyqtSignal(int, object)  # z, {rid: raw_trace}
+    finished_traces = QtCore.pyqtSignal(object)  # {rid: (z, raw_trace)}
     progress = QtCore.pyqtSignal(int)
     error = QtCore.pyqtSignal(str)
 
-    def __init__(self, stack, z, specs):
+    def __init__(self, stack, specs):
         super().__init__()
-        self.stack, self.z, self.specs = stack, z, specs
+        self.stack, self.specs = stack, specs
         self._stop = False
 
     def stop(self):
@@ -271,7 +277,7 @@ class TraceLoader(QtCore.QThread):
                 if self._stop:
                     return
                 box = self.stack.read_bbox_timeseries(
-                    self.z, s["r0"], s["r1"], s["c0"], s["c1"],
+                    s["z"], s["r0"], s["r1"], s["c0"], s["c1"],
                     should_stop=lambda: self._stop)
                 if box is None:
                     return
@@ -280,13 +286,13 @@ class TraceLoader(QtCore.QThread):
                     tr = box.reshape(box.shape[0], -1)[:, mask.ravel()].mean(axis=1)
                 else:
                     tr = np.full(box.shape[0], np.nan)
-                out[s["rid"]] = tr.astype(np.float64)
+                out[s["rid"]] = (s["z"], tr.astype(np.float64))
                 self.progress.emit(int((j + 1) / m * 100))
         except Exception as e:
             self.error.emit(f"Trace computation failed: {e}")
             return
         if not self._stop:
-            self.finished_traces.emit(self.z, out)
+            self.finished_traces.emit(out)
 
 
 # ----------------------------------------------------------------------------
@@ -320,6 +326,115 @@ def compute_dff(trace, window, method="mean"):
 
 
 # ----------------------------------------------------------------------------
+# Imported analysis ROI graphics
+# ----------------------------------------------------------------------------
+def _mask_paths(mask, row_offset=0, col_offset=0):
+    """Return visible-boundary and full-interior QPainterPaths for a mask."""
+    mask = np.asarray(mask, dtype=bool)
+    boundary = QtGui.QPainterPath()
+    hit_area = QtGui.QPainterPath()
+    try:
+        hit_area.setFillRule(QtCore.Qt.WindingFill)
+    except AttributeError:  # Qt6 enum layout
+        hit_area.setFillRule(QtCore.Qt.FillRule.WindingFill)
+
+    rows, cols = np.nonzero(mask)
+    if not rows.size:
+        return boundary, hit_area
+    r0, r1 = int(rows.min()), int(rows.max()) + 1
+    c0, c1 = int(cols.min()), int(cols.max()) + 1
+    crop = mask[r0:r1, c0:c1]
+
+    # Add one rectangle per horizontal run.  This path is invisible; it makes
+    # clicking anywhere inside a mask toggle that imported ROI.
+    for local_r, row in enumerate(crop):
+        padded = np.pad(row.astype(np.int8), (1, 1))
+        changes = np.diff(padded)
+        starts = np.flatnonzero(changes == 1)
+        stops = np.flatnonzero(changes == -1)
+        for start, stop in zip(starts, stops):
+            hit_area.addRect(float(col_offset + c0 + start),
+                             float(row_offset + r0 + local_r),
+                             float(stop - start), 1.0)
+
+    # Draw only exposed pixel edges, so adjacent mask pixels do not produce an
+    # internal grid.  The result follows the exact saved logical mask.
+    for row, col in zip(rows, cols):
+        row, col = int(row), int(col)
+        y, x = row + row_offset, col + col_offset
+        if row == 0 or not mask[row - 1, col]:
+            boundary.moveTo(float(x), float(y))
+            boundary.lineTo(float(x + 1), float(y))
+        if row + 1 == mask.shape[0] or not mask[row + 1, col]:
+            boundary.moveTo(float(x), float(y + 1))
+            boundary.lineTo(float(x + 1), float(y + 1))
+        if col == 0 or not mask[row, col - 1]:
+            boundary.moveTo(float(x), float(y))
+            boundary.lineTo(float(x), float(y + 1))
+        if col + 1 == mask.shape[1] or not mask[row, col + 1]:
+            boundary.moveTo(float(x + 1), float(y))
+            boundary.lineTo(float(x + 1), float(y + 1))
+    return boundary, hit_area
+
+
+class ImportedMaskItem(QtWidgets.QGraphicsPathItem):
+    """Exact mask contour that toggles a trace when its interior is clicked."""
+
+    def __init__(self, mask, color, toggle_callback, tooltip,
+                 row_offset=0, col_offset=0):
+        super().__init__()
+        self.color = color
+        self.toggle_callback = toggle_callback
+        self.active = False
+        self.selected = False
+        self.hovered = False
+        self._hit_area = QtGui.QPainterPath()
+        self.set_display_mask(mask, row_offset, col_offset)
+        self.setToolTip(tooltip)
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
+        self.setZValue(20)
+        self._update_pen()
+
+    def set_display_mask(self, mask, row_offset=0, col_offset=0):
+        boundary, self._hit_area = _mask_paths(
+            mask, row_offset=row_offset, col_offset=col_offset)
+        self.setPath(boundary)
+
+    def shape(self):
+        return self._hit_area
+
+    def set_state(self, active, selected=False):
+        self.active = bool(active)
+        self.selected = bool(selected)
+        self.setZValue(22 if self.active else 20)
+        self._update_pen()
+
+    def _update_pen(self):
+        width = 4 if self.selected else (3 if self.active else 1.5)
+        style = QtCore.Qt.SolidLine if self.active else QtCore.Qt.DashLine
+        self.setPen(pg.mkPen(self.color, width=width, style=style))
+
+    def hoverEnterEvent(self, event):
+        self.hovered = True
+        if not self.active:
+            self.setPen(pg.mkPen(self.color, width=3))
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.hovered = False
+        self._update_pen()
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.toggle_callback()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+# ----------------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------------
 class Viewer(QtWidgets.QMainWindow):
@@ -347,6 +462,9 @@ class Viewer(QtWidgets.QMainWindow):
         self._dirty_rids = set()
         self._trace_loader = None
         self._roi_counter = 0
+        self.imported_rois = []
+        self.imported_payload_path = None
+        self.imported_n_z = None
 
         self.setWindowTitle(f"show4Dbrain  —  {stack.path}")
         self.resize(1500, 900)
@@ -440,6 +558,24 @@ class Viewer(QtWidgets.QMainWindow):
             roirow.addWidget(b)
         lv.addLayout(roirow)
 
+        importrow = QtWidgets.QHBoxLayout()
+        importrow.addWidget(QtWidgets.QLabel("Post-analysis"))
+        self.btn_import_rois = QtWidgets.QPushButton("Import 3D ROIs...")
+        self.btn_import_rois.setToolTip(
+            "Load significant ROI contours from a PAYLOAD_CLUSTER_*.mat file.\n"
+            "Click an imported contour to add/remove its full-session trace.")
+        self.btn_unload_rois = QtWidgets.QPushButton("Unload imported")
+        self.btn_unload_rois.setToolTip(
+            "Remove imported contours and their active traces.")
+        self.btn_unload_rois.setEnabled(False)
+        importrow.addWidget(self.btn_import_rois)
+        importrow.addWidget(self.btn_unload_rois)
+        importrow.addStretch(1)
+        lv.addLayout(importrow)
+        self.imported_status = QtWidgets.QLabel("No imported analysis ROIs")
+        self.imported_status.setWordWrap(True)
+        lv.addWidget(self.imported_status)
+
         self.progress = QtWidgets.QProgressBar()
         self.progress.setMaximum(100)
         lv.addWidget(self.progress)
@@ -517,6 +653,8 @@ class Viewer(QtWidgets.QMainWindow):
         self.btn_add_ell.clicked.connect(lambda: self._add_roi("ellipse"))
         self.btn_del_sel.clicked.connect(self._delete_selected)
         self.btn_clear.clicked.connect(self._clear_rois)
+        self.btn_import_rois.clicked.connect(self._import_processed_rois)
+        self.btn_unload_rois.clicked.connect(self._unload_imported_rois)
         for key in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
             QtWidgets.QShortcut(QtGui.QKeySequence(key), self).activated.connect(
                 self._delete_selected)
@@ -538,6 +676,7 @@ class Viewer(QtWidgets.QMainWindow):
 
     def _set_z(self, z):
         self.current_z = z
+        self._refresh_imported_visibility()
         # tiles hold frames for a specific slice -> invalid on Z change
         if self._tile_loader is not None and self._tile_loader.isRunning():
             self._tile_loader.stop()
@@ -545,14 +684,18 @@ class Viewer(QtWidgets.QMainWindow):
         self.tiles.clear()
         self._tile_queue = []
         self._need_volume(self.current_v)
-        # data changed -> all traces stale
-        self._dirty_rids = set(id(e["roi"]) for e in self.rois)
+        # Manually drawn ROIs follow the displayed plane. Imported ROIs have a
+        # fixed analysis Z plane, so their already-computed traces remain valid.
+        self._dirty_rids.update(
+            id(e["roi"]) for e in self.rois if e.get("source") != "imported")
         self._pump_traces()
 
     def _on_spv_changed(self):
         new_spv = self.spv_spin.value()
         if new_spv == self.stack.spv:
             return
+        if self.imported_rois and new_spv != self.imported_n_z:
+            self._unload_imported_rois()
         self.stack.set_spv(new_spv)
         self._recompute_window_size()
         zmax, tmax = self.stack.spv - 1, self.stack.n_volumes - 1
@@ -690,10 +833,147 @@ class Viewer(QtWidgets.QMainWindow):
         if new_bin == self.bin:
             return
         self.bin = new_bin
-        self._clear_rois()        # ROI coords live in binned pixels -> invalid on change
+        self._clear_rois()        # manual coords live in binned pixels -> invalid
+        self._refresh_imported_geometry()
         self.levels = None        # refit contrast for the binned image
         self._display_from_tile(self.current_v)
         self.vb.autoRange()       # image extent changed; refit view
+
+    # ---- imported post-analysis ROIs ---------------------------------------
+    def _mask_for_display(self, entry):
+        mask = entry["mask"]
+        r0, _, c0, _ = entry["bbox"]
+        if self.bin <= 1:
+            return mask, r0, c0
+        b = self.bin
+        rows, cols = np.nonzero(mask)
+        bin_rows = (rows + r0) // b
+        bin_cols = (cols + c0) // b
+        valid = ((bin_rows >= 0) & (bin_rows < self.Hb) &
+                 (bin_cols >= 0) & (bin_cols < self.Wb))
+        if not np.any(valid):
+            return np.zeros((0, 0), dtype=bool), 0, 0
+        bin_rows, bin_cols = bin_rows[valid], bin_cols[valid]
+        rb0, cb0 = int(bin_rows.min()), int(bin_cols.min())
+        display_mask = np.zeros(
+            (int(bin_rows.max()) - rb0 + 1,
+             int(bin_cols.max()) - cb0 + 1), dtype=bool)
+        display_mask[bin_rows - rb0, bin_cols - cb0] = True
+        return display_mask, rb0, cb0
+
+    def _import_processed_rois(self):
+        payload_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select cluster-analysis payload", "",
+            "MATLAB payloads (PAYLOAD_CLUSTER_*.mat *.mat);;All files (*)")
+        if not payload_path:
+            return
+
+        mask_path = find_hex_rois_file(payload_path)
+        if mask_path is None:
+            mask_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Select the related hex_rois.mat", "",
+                "ROI masks (hex_rois.mat *.mat);;All files (*)")
+            if not mask_path:
+                return
+
+        self.imported_status.setText("Reading significant ROI masks...")
+        QtWidgets.QApplication.processEvents()
+        try:
+            data = load_significant_rois(
+                payload_path, mask_path, (self.stack.H, self.stack.W),
+                transpose=self.stack.transpose)
+            if data["n_z"] != self.stack.spv:
+                raise ProcessedROIImportError(
+                    f"The analysis contains {data['n_z']} Z planes, but the viewer "
+                    f"is set to {self.stack.spv} slices/vol. Set slices/vol to "
+                    f"{data['n_z']} and import again.")
+        except (ProcessedROIImportError, OSError, ValueError) as exc:
+            self.imported_status.setText("Import failed")
+            QtWidgets.QMessageBox.critical(
+                self, "Could not import 3D ROIs", str(exc))
+            return
+        self._install_imported_rois(data)
+
+    def _install_imported_rois(self, data):
+        self._unload_imported_rois()
+        self.imported_payload_path = data["payload_path"]
+        self.imported_n_z = data["n_z"]
+
+        for metadata in data["rois"]:
+            entry = dict(metadata)
+            entry["source"] = "imported"
+            entry["kind"] = "mask"
+            entry["active"] = False
+            cluster = entry.get("cluster")
+            color_index = ((cluster - 1) if cluster is not None
+                           else (entry["index"] - 1))
+            entry["color"] = ROI_COLORS[color_index % len(ROI_COLORS)]
+
+            details = [
+                f"Significant ROI {entry['index']}",
+                f"Z {entry['z']}",
+                f"tile {entry['roi_index']}",
+            ]
+            if cluster is not None:
+                details.insert(1, f"cluster {cluster}")
+            if "cluster_p" in entry:
+                details.append(f"cluster p = {entry['cluster_p']:.4g}")
+            if "cluster_mass" in entry:
+                details.append(f"mass = {entry['cluster_mass']:.4g}")
+            tooltip = " | ".join(details) + "\nClick to add/remove its trace."
+
+            display_mask, row_offset, col_offset = self._mask_for_display(entry)
+            item = ImportedMaskItem(
+                display_mask, entry["color"],
+                lambda e=entry: self._toggle_imported_roi(e), tooltip,
+                row_offset=row_offset, col_offset=col_offset)
+            entry["roi"] = item
+            self.imported_rois.append(entry)
+            self.vb.addItem(item)
+
+        self.btn_unload_rois.setEnabled(True)
+        self._refresh_imported_visibility()
+        self._update_imported_status()
+
+    def _refresh_imported_geometry(self):
+        for entry in self.imported_rois:
+            display_mask, row_offset, col_offset = self._mask_for_display(entry)
+            entry["roi"].set_display_mask(
+                display_mask, row_offset=row_offset, col_offset=col_offset)
+
+    def _refresh_imported_visibility(self):
+        for entry in self.imported_rois:
+            entry["roi"].setVisible(entry["z"] == self.current_z)
+        if self.imported_rois:
+            self._update_imported_status()
+
+    def _update_imported_status(self):
+        total = len(self.imported_rois)
+        if not total:
+            self.imported_status.setText("No imported analysis ROIs")
+            return
+        on_plane = sum(e["z"] == self.current_z for e in self.imported_rois)
+        active = sum(e["active"] for e in self.imported_rois)
+        clusters = {e["cluster"] for e in self.imported_rois if "cluster" in e}
+        cluster_note = (f" in {len(clusters)} clusters" if clusters else "")
+        self.imported_status.setText(
+            f"{total} significant ROIs{cluster_note} | "
+            f"Z {self.current_z}: {on_plane} contours | {active} active traces")
+
+    def _unload_imported_rois(self):
+        imported_items = {id(e["roi"]) for e in self.imported_rois}
+        for entry in list(self.imported_rois):
+            if entry["active"]:
+                self._deactivate_imported_roi(entry)
+            self.vb.removeItem(entry["roi"])
+        if self.selected_roi is not None and id(self.selected_roi) in imported_items:
+            self.selected_roi = None
+        self.imported_rois = []
+        self.imported_payload_path = None
+        self.imported_n_z = None
+        if hasattr(self, "btn_unload_rois"):
+            self.btn_unload_rois.setEnabled(False)
+            self._update_imported_status()
 
     # ---- ROIs ---------------------------------------------------------------
     def _probe_frame(self):
@@ -721,25 +1001,67 @@ class Viewer(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.vb.addItem(roi)
-        self.rois.append({"roi": roi, "kind": kind, "color": color})
         name = f"ROI {self._roi_counter}"
-        self.raw_curves[id(roi)] = self.raw_plot.plot(pen=pg.mkPen(color, width=2), name=name)
-        self.dff_curves[id(roi)] = self.dff_plot.plot(pen=pg.mkPen(color, width=2))
+        entry = {
+            "roi": roi, "kind": kind, "color": color, "name": name,
+            "source": "manual", "active": True,
+        }
+        self.rois.append(entry)
+        self._add_trace_curves(entry)
         roi.sigRegionChangeFinished.connect(lambda r=roi: self._mark_dirty(id(r)))
         roi.sigRemoveRequested.connect(lambda r=roi: self._remove_roi(r))
         roi.sigClicked.connect(lambda r=roi, *a: self._select_roi(r))
         self._select_roi(roi)
         self._mark_dirty(id(roi))
 
+    def _add_trace_curves(self, entry):
+        roi, color = entry["roi"], entry["color"]
+        self.raw_curves[id(roi)] = self.raw_plot.plot(
+            pen=pg.mkPen(color, width=2), name=entry["name"])
+        self.dff_curves[id(roi)] = self.dff_plot.plot(
+            pen=pg.mkPen(color, width=2))
+
+    def _toggle_imported_roi(self, entry):
+        if entry["active"]:
+            self._deactivate_imported_roi(entry)
+        else:
+            self._activate_imported_roi(entry)
+
+    def _activate_imported_roi(self, entry):
+        if entry["active"]:
+            return
+        entry["active"] = True
+        cluster_note = (f", C{entry['cluster']}" if "cluster" in entry else "")
+        entry["name"] = f"Sig ROI {entry['index']} (Z{entry['z']}{cluster_note})"
+        self.rois.append(entry)
+        self._add_trace_curves(entry)
+        self._select_roi(entry["roi"])
+        self._update_imported_status()
+        self._mark_dirty(id(entry["roi"]))
+
+    def _deactivate_imported_roi(self, entry):
+        if not entry["active"]:
+            return
+        entry["active"] = False
+        self._drop_roi_trace(entry)
+        self._select_roi(None)
+        self._update_imported_status()
+
     def _select_roi(self, roi):
         self.selected_roi = roi
         for e in self.rois:
             r = e["roi"]
+            if e.get("source") == "imported":
+                r.set_state(True, r is roi)
+                continue
             r.setPen(pg.mkPen(e["color"], width=3 if r is roi else 2))
             try:
                 r.setSelected(r is roi)
             except Exception:
                 pass
+        for e in self.imported_rois:
+            if not e["active"]:
+                e["roi"].set_state(False, False)
 
     def _delete_selected(self):
         if self.selected_roi is not None and any(e["roi"] is self.selected_roi for e in self.rois):
@@ -748,9 +1070,20 @@ class Viewer(QtWidgets.QMainWindow):
             self._remove_roi(self.rois[-1]["roi"])
 
     def _remove_roi(self, roi):
-        rid = id(roi)
+        entry = next((e for e in self.rois if e["roi"] is roi), None)
+        if entry is None:
+            return
+        if entry.get("source") == "imported":
+            self._deactivate_imported_roi(entry)
+            return
         self.vb.removeItem(roi)
-        self.rois = [e for e in self.rois if e["roi"] is not roi]
+        self._drop_roi_trace(entry)
+        self._select_roi(None)
+
+    def _drop_roi_trace(self, entry):
+        roi = entry["roi"]
+        rid = id(roi)
+        self.rois = [e for e in self.rois if e is not entry]
         if self.selected_roi is roi:
             self.selected_roi = None
         rc = self.raw_curves.pop(rid, None)
@@ -770,7 +1103,15 @@ class Viewer(QtWidgets.QMainWindow):
             self._remove_roi(e["roi"])
         self.selected_roi = None
 
-    def _roi_spec(self, roi):
+    def _roi_spec(self, entry):
+        roi = entry["roi"]
+        if entry.get("source") == "imported":
+            r0, r1, c0, c1 = entry["bbox"]
+            return {
+                "rid": id(roi), "z": entry["z"],
+                "r0": r0, "r1": r1, "c0": c0, "c1": c1,
+                "mask": entry["mask"],
+            }
         # ROI is drawn on the binned display -> slices are in binned pixels
         sl, _ = roi.getArraySlice(self._probe_frame(), self.img_item,
                                   axes=(0, 1), returnSlice=True)
@@ -796,7 +1137,10 @@ class Viewer(QtWidgets.QMainWindow):
             mask = np.repeat(np.repeat(mask_b, b, axis=0), b, axis=1)
         else:
             mask = mask_b
-        return {"rid": id(roi), "r0": r0, "r1": r1, "c0": c0, "c1": c1, "mask": mask}
+        return {
+            "rid": id(roi), "z": self.current_z,
+            "r0": r0, "r1": r1, "c0": c0, "c1": c1, "mask": mask,
+        }
 
     # ---- trace pipeline -----------------------------------------------------
     def _mark_dirty(self, rid):
@@ -810,26 +1154,29 @@ class Viewer(QtWidgets.QMainWindow):
         for e in self.rois:
             rid = id(e["roi"])
             if rid in self._dirty_rids:
-                s = self._roi_spec(e["roi"])
+                s = self._roi_spec(e)
                 if s is not None:
                     specs.append(s)
         if not specs:
             self._dirty_rids = set(r for r in self._dirty_rids
                                    if any(id(e["roi"]) == r for e in self.rois))
             return
-        self._trace_loader = TraceLoader(self.stack, self.current_z, specs)
+        self._trace_loader = TraceLoader(self.stack, specs)
         self._trace_loader.progress.connect(
             lambda p: self.status.setText(f"Computing traces ... {p}%"))
         self._trace_loader.finished_traces.connect(self._on_traces_ready)
         self._trace_loader.error.connect(self._on_load_error)
         self._trace_loader.start()
 
-    def _on_traces_ready(self, z, raw_map):
-        if z != self.current_z:
-            return
+    def _on_traces_ready(self, raw_map):
         win, method = self.base_win.value(), self.base_method.currentText()
-        for rid, raw in raw_map.items():
-            if not any(id(e["roi"]) == rid for e in self.rois):
+        for rid, (z, raw) in raw_map.items():
+            entry = next((e for e in self.rois if id(e["roi"]) == rid), None)
+            if entry is None:
+                continue
+            expected_z = (entry["z"] if entry.get("source") == "imported"
+                          else self.current_z)
+            if z != expected_z:
                 continue
             self.raw_traces[rid] = raw
             self.dff_traces[rid] = compute_dff(raw, win, method)
@@ -838,7 +1185,7 @@ class Viewer(QtWidgets.QMainWindow):
         self._update_markers(self.current_v)
         self._display_from_tile(self.current_v)  # restore status line
         if self._dirty_rids:
-            self._pump_traces()
+            QtCore.QTimer.singleShot(0, self._pump_traces)
 
     def _recompute_dff_only(self):
         win, method = self.base_win.value(), self.base_method.currentText()
