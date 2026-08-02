@@ -161,7 +161,7 @@ searches in this order:
 2. `hex_rois.mat` in the same directory as the selected payload.
 3. `hex_rois.mat` in each nearest parent directory, walking upward. For the
    WIDE-CAT layout this finds `dfF/hex_rois.mat` from a payload nested below
-   `dfF/paper_figures_pretty/...`.
+   `dfF/paper_figures_/...`.
 4. If automatic search finds nothing, a second file picker asks for the mask
    file.
 
@@ -173,13 +173,13 @@ A typical WIDE-CAT result tree therefore works without moving or copying files:
 ```text
 dfF/
 ├── hex_rois.mat
-└── paper_figures_pretty/
+└── paper_figures_/
     └── CLUSTER_.../
         └── PAYLOAD_CLUSTER_fish004.mat
 ```
 
 Here the GUI starts beside `PAYLOAD_CLUSTER_fish004.mat`, checks
-`CLUSTER_.../`, then `paper_figures_pretty/`, and finds the nearest
+`CLUSTER_.../`, then `paper_figures_/`, and finds the nearest
 `hex_rois.mat` when it reaches `dfF/`.
 
 #### 3. Trace calculation
