@@ -47,12 +47,23 @@ your acquisition used (set on the command line or live in the GUI). For a plain
 ## Install
 
 ```bash
+python -m venv .venv
+# PowerShell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+.\.venv\Scripts\Activate.ps1
+# macOS / Linux
+# source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install h5py numpy scipy pyqtgraph PyQt5
-pip install psutil          # optional but recommended
+python -m pip install -r requirements.txt
 ```
 
-(Use a virtual environment if you like: `python -m venv .venv` then activate it.)
+If you do not already have `requirements.txt`, create it once with:
+
+```bash
+python -m pip install --upgrade pip
+pip install h5py numpy scipy pyqtgraph PyQt5 psutil
+pip freeze > requirements.txt
+```
 
 ## Run
 

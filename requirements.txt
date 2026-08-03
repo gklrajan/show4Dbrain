@@ -1,0 +1,8 @@
+h5py==3.14.0
+numpy==2.0.2
+psutil==7.2.2
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.2
+PyQt5_sip==12.17.1
+pyqtgraph==0.13.7
+scipy==1.13.1
