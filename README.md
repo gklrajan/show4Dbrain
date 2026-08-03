@@ -65,13 +65,14 @@ The variable inside the file is auto-detected (largest 3D dataset); override wit
 `--var` if needed.
 
 ### Flags
-| Flag | Meaning | Default |
-|------|---------|---------|
-| `--file PATH` | Path to the `.mat` file (omit for a file picker) | file picker |
-| `--var NAME` | Variable (dataset) name inside the file | auto-detect |
-| `--spv N` | Slices per volume | `40` |
-| `--ram-frac F` | Fraction of free RAM for the image window | `0.25` |
-| `--no-transpose` | Don't transpose frames (use if the image looks rotated 90°) | off |
+
+| Flag             | Meaning                                                     | Default     |
+| ---------------- | ----------------------------------------------------------- | ----------- |
+| `--file PATH`    | Path to the `.mat` file (omit for a file picker)            | file picker |
+| `--var NAME`     | Variable (dataset) name inside the file                     | auto-detect |
+| `--spv N`        | Slices per volume                                           | `40`        |
+| `--ram-frac F`   | Fraction of free RAM for the image window                   | `0.25`      |
+| `--no-transpose` | Don't transpose frames (use if the image looks rotated 90°) | off         |
 
 `--spv` is only a starting value; slices-per-volume is also editable live in the GUI.
 
@@ -86,9 +87,18 @@ The variable inside the file is auto-detected (largest 3D dataset); override wit
   tile boundary briefly loads the next chunk (prefetched when possible). You can
   also drag the dashed line on the raw trace to scrub.
 - **+ Rect ROI / + Ellipse ROI** — drop an ROI (resize via its corner handles).
+- **Import 3D ROIs...** — load the significant ROI candidates from a
+  MATLAB v7.3 analysis payload. The viewer automatically looks relative to the
+  selected payload for the related `hex_rois.mat` mask file.
+  Dashed contours are available candidates; click anywhere inside one to add
+  its trace. The active contour becomes solid. Click it again to remove its
+  trace while leaving the candidate available. Imported contours appear only
+  on their analysis Z plane. They are colored by cluster when cluster metadata
+  is available, or by individual ROI otherwise.
 - **Delete / select ROIs** — click an ROI to select it, then `Del` / `Backspace`
   or **Delete selected**; right-click → **Remove** also works; **Clear ROIs**
-  removes all.
+  removes manually drawn ROIs and all active traces. Imported candidate
+  contours remain available until **Unload imported** is pressed.
 - **Trace plots** — full-session raw mean intensity (top) and rolling-baseline
   `dF/F = (F − F0) / F0` (bottom); the dot marks the current volume.
 - **dF/F baseline** — `mean`, `median`, or `pct_10` / `pct_20`; **window (vols)**
@@ -97,6 +107,95 @@ The variable inside the file is auto-detected (largest 3D dataset); override wit
   **offset** in volumes; grey bands appear on both trace plots.
 - **Histogram bar** (right of the image) — display contrast only.
 
+### Post-analysis ROI import
+
+The importer needs three pieces of information: the image stack already open in
+show4Dbrain, an analysis payload identifying the significant ROIs, and the
+logical pixel masks for those ROIs. It does **not** need a saved dF/F file.
+
+#### 1. Analysis payload
+
+The recommended minimal MATLAB v7.3/HDF5 payload contains:
+
+| Variable  | Meaning                                              |
+| --------- | ---------------------------------------------------- |
+| `sig_idx` | One-based flattened indices of the significant ROIs  |
+| `N_Z`     | Number of Z planes represented by the ROI collection |
+| `N_ROIS`  | Number of ROI masks per Z plane                      |
+
+`sig_idx` uses the following MATLAB-style, one-based mapping:
+
+```text
+sig_idx = (z_plane - 1) * N_ROIS + roi_number
+```
+
+where `z_plane` is `1..N_Z` and `roi_number` is `1..N_ROIS`.
+
+`N_Z` and `N_ROIS` are always required. Cluster analysis is optional when
+`sig_idx` is supplied. A payload may additionally contain:
+
+| Variable         | Optional or conditional use                                                                                      |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `cluster_labels` | One cluster number per flattened ROI; enables cluster colors and names. Required only for the fallback below     |
+| `cluster_sig`    | Logical flag for each cluster. Used with `cluster_labels` to derive significant indices when `sig_idx` is absent |
+| `cluster_p`      | Cluster-level p-values shown in ROI tooltips                                                                     |
+| `cluster_masses` | Cluster masses shown in ROI tooltips                                                                             |
+
+Therefore, a payload without `sig_idx` is also valid, but only when it contains
+both `cluster_labels` and `cluster_sig`. Other analysis fields are allowed but
+ignored by the importer.
+
+#### 2. ROI mask source
+
+The exact logical masks must be stored in a top-level variable named
+`hex_rois`. Despite the historical name, these are simply ROI masks: an outer
+MATLAB cell array with one entry per Z plane, where each plane contains
+`N_ROIS` logical `H x W` masks. The mask dimensions must match the displayed
+image stack.
+
+`hex_rois` can be inside the selected payload itself. Otherwise, place it in a
+separate file named exactly `hex_rois.mat`. After a payload is selected, the GUI
+searches in this order:
+
+1. A top-level `hex_rois` variable inside the selected payload.
+2. `hex_rois.mat` in the same directory as the selected payload.
+3. `hex_rois.mat` in each nearest parent directory, walking upward. For the
+   WIDE-CAT layout this finds `dfF/hex_rois.mat` from a payload nested below
+   `dfF/paper_figures_/...`.
+4. If automatic search finds nothing, a second file picker asks for the mask
+   file.
+
+This search is relative to the selected payload, not to the terminal's current
+working directory.
+
+A typical WIDE-CAT result tree therefore works without moving or copying files:
+
+```text
+dfF/
+├── hex_rois.mat
+└── paper_figures_/
+    └── CLUSTER_.../
+        └── PAYLOAD_CLUSTER_fish004.mat
+```
+
+Here the GUI starts beside `PAYLOAD_CLUSTER_fish004.mat`, checks
+`CLUSTER_.../`, then `paper_figures_/`, and finds the nearest
+`hex_rois.mat` when it reaches `dfF/`.
+
+#### 3. Trace calculation
+
+Set **slices/vol** to the same value as payload `N_Z` before importing. Trace
+data is loaded lazily: importing contours does not read every full-session
+trace. Only clicking a candidate reads that ROI's bounding box at its fixed Z
+plane. Display binning changes the drawn contour but trace extraction continues
+to use the full-resolution saved mask. Raw `F` is calculated as the mask's mean
+pixel value in the open image stack. Rolling-baseline dF/F is then calculated
+inside show4Dbrain using the GUI's baseline method and window.
+
+Because show4Dbrain recomputes these traces, its dF/F can differ from the values
+used by an upstream analysis that applied background correction, high-pass
+filtering, or a different baseline definition.
+
 ## Troubleshooting
 
 - **`No such file or directory`** — wrong path; use the file picker or a full path.
@@ -104,6 +203,11 @@ The variable inside the file is auto-detected (largest 3D dataset); override wit
 - **`Variable '...' not found`** — the error lists available names; use `--var`.
 - **Won't open / not HDF5** — pre-v7.3 `.mat`; re-save in MATLAB:
   `save('file.mat','VarName','-v7.3')`.
+- **3D ROI import reports a shape mismatch** — verify that the payload and
+  `hex_rois.mat` belong to the displayed stack. If both image and contours look
+  transposed, use or remove `--no-transpose` consistently.
+- **3D ROI import reports a Z mismatch** — set **slices/vol** to the payload's
+  `N_Z`, then import again.
 - **Scrubbing hitches every N volumes** — that's a tile boundary load. Increase
   `--ram-frac` for larger windows (fewer boundaries) if you have the RAM.
 - **First read of a plane is slow** — MATLAB v7.3 files are often gzip-chunked;
