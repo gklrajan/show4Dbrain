@@ -229,4 +229,4 @@ filtering, or a different baseline definition.
 
 ## Citation
 
-Gokul Rajan. (2026). gklrajan/show4Dbrain: v2.0.0 (Version v2.0.0). Zenodo. https://doi.org/10.5281/zenodo.21825886
+Gokul Rajan. (2026). show4Dbrain: A Lightweight Tool for Visualizing 4D Functional Imaging Data (Version v2.0.0) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.21825886
