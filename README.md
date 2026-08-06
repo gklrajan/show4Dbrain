@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1275694334.svg)](https://doi.org/10.5281/zenodo.21825885)
+
 # show4Dbrain
 
 A memory-efficient GUI for browsing large 4D image stacks (`Y × X × Z × T`)
@@ -224,3 +226,7 @@ filtering, or a different baseline definition.
 - **First read of a plane is slow** — MATLAB v7.3 files are often gzip-chunked;
   the first read pays a decompression cost, then it's fast.
 - **Have another issue or feature request?** — Please create a new issue! Thank you! :)
+
+## Citation
+
+Gokul Rajan. (2026). gklrajan/show4Dbrain: v2.0.0 (Version v2.0.0). Zenodo. https://doi.org/10.5281/zenodo.21825886
