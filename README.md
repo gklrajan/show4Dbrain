@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/1275694334.svg)](https://doi.org/10.5281/zenodo.21825885)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21825885-blue.svg)](https://doi.org/10.5281/zenodo.21825885)
 
 # show4Dbrain
 
