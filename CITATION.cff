@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "show4Dbrain: A Lightweight Tool for Visualizing 4D Functional Imaging Data"
+type: software
+authors:
+  - family-names: Rajan
+    given-names: Gokul
+version: 2.0.0
+doi: 10.5281/zenodo.21825886
+repository-code: "https://github.com/gklrajan/show4Dbrain"
+url: "https://doi.org/10.5281/zenodo.21825886"
+license: MIT
+keywords:
+  - 4D imaging
+  - calcium imaging
+  - functional imaging
+  - HDF5
+  - PyQt
+  - data visualization
