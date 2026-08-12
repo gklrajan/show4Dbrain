@@ -34,7 +34,7 @@ Run
 ---
     python show4dbrain.py --file your_stack.mat
     # variable auto-detected (largest 3D dataset); override with --var
-    # slices per volume default 40; override with --spv
+    # slices per volume default 20; override with --spv
     # image window uses ~25% of free RAM; override with --ram-frac
     # if the image looks rotated 90 deg, add --no-transpose
 
@@ -305,7 +305,7 @@ def _sliding_percentile(F, window, p):
     return np.percentile(sw, p, axis=1)
 
 
-def compute_dff(trace, window, method="mean"):
+def compute_dff(trace, window, method="median"):
     F = np.asarray(trace, dtype=np.float64)
     n = F.size
     if n == 0:
@@ -313,10 +313,10 @@ def compute_dff(trace, window, method="mean"):
     window = int(np.clip(window, 1, n))
     if method == "mean":
         F0 = uniform_filter1d(F, size=window, mode="nearest") if _HAVE_SCIPY \
-            else _sliding_percentile(F, window, 50)
+            else _sliding_percentile(F, window, 25)
     elif method == "median":
         F0 = median_filter(F, size=window, mode="nearest") if _HAVE_SCIPY \
-            else _sliding_percentile(F, window, 50)
+            else _sliding_percentile(F, window, 25)
     elif method.startswith("pct"):
         F0 = _sliding_percentile(F, window, float(method.split("_")[1]))
     else:
@@ -592,30 +592,40 @@ class Viewer(QtWidgets.QMainWindow):
         ctl.addWidget(QtWidgets.QLabel("dF/F baseline"), 0, 0)
         self.base_method = QtWidgets.QComboBox()
         self.base_method.addItems(["mean", "median", "pct_10", "pct_20"])
+        self.base_method.setCurrentText("median")
         ctl.addWidget(self.base_method, 0, 1)
+
         ctl.addWidget(QtWidgets.QLabel("window (vols)"), 0, 2)
         self.base_win = QtWidgets.QSpinBox()
         self.base_win.setRange(1, max(1, self.stack.n_volumes))
-        self.base_win.setValue(min(50, self.stack.n_volumes))
+        self.base_win.setValue(min(25, self.stack.n_volumes))
         ctl.addWidget(self.base_win, 0, 3)
 
         self.stim_on = QtWidgets.QCheckBox("Stim shading")
         ctl.addWidget(self.stim_on, 1, 0)
+
         ctl.addWidget(QtWidgets.QLabel("dur"), 1, 1)
         self.stim_dur = QtWidgets.QSpinBox()
         self.stim_dur.setRange(1, 100000)
-        self.stim_dur.setValue(6)
+        self.stim_dur.setValue(5)
         ctl.addWidget(self.stim_dur, 1, 2)
-        ctl.addWidget(QtWidgets.QLabel("inter-stim"), 1, 3)
+
+        ctl.addWidget(QtWidgets.QLabel("onset interval"), 1, 3)
+
         self.stim_gap = QtWidgets.QSpinBox()
-        self.stim_gap.setRange(0, 100000)
-        self.stim_gap.setValue(17)
-        self.stim_gap.setToolTip("OFF gap between stims (volumes). Cycle = dur + inter-stim.")
+        self.stim_gap.setRange(1, 100000)
+        self.stim_gap.setValue(25)
+
+        self.stim_gap.setToolTip(
+            "Stimulus onset-to-onset interval in volumes. "
+            "For the acquisition script, use 25."
+        )
         ctl.addWidget(self.stim_gap, 1, 4)
+
         ctl.addWidget(QtWidgets.QLabel("offset"), 1, 5)
         self.stim_off = QtWidgets.QSpinBox()
         self.stim_off.setRange(0, 100000)
-        self.stim_off.setValue(0)
+        self.stim_off.setValue(25)
         ctl.addWidget(self.stim_off, 1, 6)
         rv.addLayout(ctl)
 
@@ -1230,7 +1240,7 @@ class Viewer(QtWidgets.QMainWindow):
         self._stim_items = []
         if not self.stim_on.isChecked():
             return
-        period = self.stim_dur.value() + self.stim_gap.value()
+        period = self.stim_gap.value()
         dur, off, n = self.stim_dur.value(), self.stim_off.value(), self.stack.n_volumes
         start = off
         while start < n:
@@ -1260,7 +1270,7 @@ def main():
         description="show4Dbrain — lazy, memory-safe viewer for big 4D .mat/HDF5 stacks")
     ap.add_argument("--file", help="path to the .mat (HDF5/v7.3) file")
     ap.add_argument("--var", default=None, help="variable name (default: auto-detect)")
-    ap.add_argument("--spv", type=int, default=40, help="slices per volume (default 40)")
+    ap.add_argument("--spv", type=int, default=20, help="slices per volume (default 20)")
     ap.add_argument("--ram-frac", type=float, default=0.25,
                     help="fraction of free RAM for the image window (default 0.25)")
     ap.add_argument("--no-transpose", action="store_true",
